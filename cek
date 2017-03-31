@@ -1,0 +1,137 @@
+package main
+ 
+import (
+    "bytes"
+    "encoding/base64"
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "net/url"
+    "os"
+    "strconv"
+ 
+    "github.com/line/line-bot-sdk-go/linebot"
+ 
+    "google.golang.org/appengine"
+    "google.golang.org/appengine/log"
+    "google.golang.org/appengine/taskqueue"
+    "google.golang.org/appengine/urlfetch"
+)
+ 
+var (
+    channelID     int64
+    channelSecret string
+    channelMID    string
+)
+ 
+func init() {
+    var err error
+ 
+    channelID, err = strconv.ParseInt(os.Getenv("CHANNEL_ID"), 10, 64)
+    if err != nil {
+        panic(fmt.Sprintf("not set environment variable (CHANNEL_ID). %v", err))
+    }
+ 
+    channelSecret = os.Getenv("CHANNEL_SECRET")
+    if channelSecret == "" {
+        panic("not set environment variable (CHANNEL_SECRET).")
+    }
+ 
+    channelMID = os.Getenv("CHANNEL_MID")
+    if channelMID == "" {
+        panic("not set environment variable (CHANNEL_MID).")
+    }
+ 
+    http.HandleFunc("/messages/receive", receiveMessagesHandleFunc)
+    http.HandleFunc("/messages/send", sendMessagesHandleFunc)
+}
+ 
+func receiveMessagesHandleFunc(w http.ResponseWriter, r *http.Request) {
+    ctx := appengine.NewContext(r)
+    client := urlfetch.Client(ctx)
+    bot, err := linebot.NewClient(channelID, channelSecret, channelMID, linebot.WithHTTPClient(client))
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+ 
+    received, err := bot.ParseRequest(r)
+    if err != nil {
+        if err == linebot.ErrInvalidSignature {
+            http.Error(w, err.Error(), http.StatusBadRequest)
+        } else {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+        }
+        return
+    }
+ 
+    for _, result := range received.Results {
+        v, err := json.Marshal(&result)
+        if err != nil {
+            log.Errorf(ctx, "result marshal error: %v", err)
+            continue
+        }
+ 
+        t := taskqueue.NewPOSTTask("/messages/send", url.Values{
+            "message": {string(v)},
+        })
+        if _, err := taskqueue.Add(ctx, t, ""); err != nil {
+            log.Errorf(ctx, "add task error: %v", err)
+        }
+    }
+}
+ 
+func sendMessagesHandleFunc(w http.ResponseWriter, r *http.Request) {
+    ctx := appengine.NewContext(r)
+    client := urlfetch.Client(ctx)
+    bot, err := linebot.NewClient(channelID, channelSecret, channelMID, linebot.WithHTTPClient(client))
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+ 
+    var message linebot.ReceivedResult
+    v := r.FormValue("message")
+    if err := json.Unmarshal([]byte(v), &message); err != nil {
+        log.Errorf(ctx, "message unmarshal error: %v", err)
+        return
+    }
+ 
+    content := message.Content()
+    if content == nil {
+        log.Errorf(ctx, "message content nil. id = %s", message.ID)
+        return
+    }
+    if !content.IsMessage {
+        log.Errorf(ctx, "message content is not message. id = %s", message.ID)
+        return
+    }
+ 
+    switch content.ContentType {
+    case linebot.ContentTypeText:
+        text, err := content.TextContent()
+        if err != nil {
+            log.Errorf(ctx, "get text content error: %v. id = %s", err, message.ID)
+            return
+        }
+        _, err = bot.SendText([]string{content.From}, text.Text)
+        if err != nil {
+            log.Errorf(ctx, "send message error: %v. id = %s", err, message.ID)
+            return
+        }
+    case linebot.ContentTypeImage:
+        log.Errorf(ctx, "not implemented error(image). id = %s", message.ID)
+    case linebot.ContentTypeVideo:
+        log.Errorf(ctx, "not implemented error(video). id = %s", message.ID)
+    case linebot.ContentTypeAudio:
+        log.Errorf(ctx, "not implemented error(audio). id = %s", message.ID)
+    case linebot.ContentTypeLocation:
+        log.Errorf(ctx, "not implemented error(location). id = %s", message.ID)
+    case linebot.ContentTypeSticker:
+        log.Errorf(ctx, "not implemented error(sticker). id = %s", message.ID)
+    case linebot.ContentTypeContact:
+        log.Errorf(ctx, "not implemented error(contact). id = %s", message.ID)
+    case linebot.ContentTypeRichMessage:
+        log.Errorf(ctx, "not implemented error(rich message). id = %s", message.ID)
+    }
+}
